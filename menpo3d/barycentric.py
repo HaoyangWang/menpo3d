@@ -111,6 +111,7 @@ def barycentric_coordinate_interpolation(self, per_vertex_interpolant,
     if not len(shape) == 2 or shape[0] != self.n_points:
         raise ValueError("per_vertex_interpolant must be of shape (n_points, k)")
     t = per_vertex_interpolant[self.trilist[tri_indices]]
+    #print(t.shape)
     return np.sum(t * bcoords[..., None], axis=1)
 
 
@@ -162,5 +163,6 @@ TriMesh.snap_pointcloud_to_surface = snap_pointcloud_to_surface
 TriMesh.barycentric_coordinates_of_pointcloud = barycentric_coordinates_of_pointcloud
 TriMesh.barycentric_coordinate_interpolation = barycentric_coordinate_interpolation
 TriMesh.project_barycentric_coordinates = project_barycentric_coordinates
+TriMesh.barycentric_points_from_contained_points = barycentric_points_from_contained_points
 ColouredTriMesh.sample_texture_with_barycentric_coordinates = sample_texture_with_barycentric_coordinates_colour
 TexturedTriMesh.sample_texture_with_barycentric_coordinates = sample_texture_with_barycentric_coordinates_texture

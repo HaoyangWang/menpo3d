@@ -132,13 +132,14 @@ class MMFitter(object):
     def _fit(self, image, camera, instance=None, gt_mesh=None, max_iters=50,
              camera_update=False, focal_length_update=False,
              reconstruction_weight=1., shape_prior_weight=None,
-             texture_prior_weight=None, landmarks_prior_weight=None,
-             landmarks=None, return_costs=False):
+             texture_prior_weight=None, landmarks_prior_weight=None, component_weights = None,
+             confidence_mask = None, landmarks=None, return_costs=False, verbose = True):
         # Check provided instance
         if instance is None:
             instance = self.mm.instance()
 
         # Check arguments
+
         max_iters = checks.check_max_iters(max_iters, self.n_scales)
         reconstruction_weight = checks.check_multi_scale_param(
             self.n_scales, (float, int, None), 'reconstruction_prior_weight',
@@ -172,8 +173,8 @@ class MMFitter(object):
                 reconstruction_weight=reconstruction_weight[i],
                 shape_prior_weight=shape_prior_weight[i],
                 texture_prior_weight=texture_prior_weight[i],
-                landmarks_prior_weight=landmarks_prior_weight[i],
-                landmarks=landmarks, return_costs=return_costs)
+                landmarks_prior_weight=landmarks_prior_weight[i], component_weights = component_weights,
+                confidence_mask = confidence_mask, landmarks=landmarks, return_costs=return_costs, verbose = verbose)
 
             # Get current instance
             instance = algorithm_result.final_mesh
@@ -225,9 +226,9 @@ class MMFitter(object):
     def fit_from_shape(self, image, initial_shape, gt_mesh=None, max_iters=50,
                        camera_update=True, focal_length_update=False,
                        reconstruction_weight=1., shape_prior_weight=1.,
-                       texture_prior_weight=1., landmarks_prior_weight=1.,
+                       texture_prior_weight=1., landmarks_prior_weight=1., component_weights = None,
                        return_costs=False, distortion_coeffs=None,
-                       init_shape_params_from_lms=False):
+                       confidence_mask = None, init_shape_params_from_lms=False, verbose = True):
         # Check that the provided initial shape has the same number of points
         # as the landmarks of the model
         if initial_shape.n_points != self.mm.landmarks.n_points:
@@ -245,6 +246,7 @@ class MMFitter(object):
             self.mm.landmarks, rescaled_initial_shape, rescaled_image.shape,
             distortion_coeffs=distortion_coeffs)
 
+        '''
         if init_shape_params_from_lms:
             # Wrap the shape model in a container that allows us to mask the
             # PCA basis spatially
@@ -261,7 +263,25 @@ class MMFitter(object):
             instance = self.mm.instance(shape_weights)
         else:
             instance = None
+        '''
+        
+        if init_shape_params_from_lms:
+            # Wrap the shape model in a container that allows us to mask the
+            # PCA basis spatially
+            sm = ShapeModel(self.mm.shape_model)
+            # Only keep the landmark points in the basis
+            sm_lms_3d = sm.mask_points(self.mm.model_landmarks_index)
 
+            # Warp the basis with the camera and retain only the first two dims
+            sm_lms_2d = camera.apply(sm_lms_3d).mask_dims([0, 1])
+            # Project onto the first few shape components to give an initial
+            # shape
+            shape_weights = sm_lms_2d.project(rescaled_initial_shape,
+                                              n_components=10)
+            instance = self.mm.instance(shape_weights)
+        else:
+            instance = None
+        
         # Execute multi-scale fitting
         algorithm_results = self._fit(
             rescaled_image, camera, instance=instance, gt_mesh=gt_mesh,
@@ -270,8 +290,8 @@ class MMFitter(object):
             reconstruction_weight=reconstruction_weight,
             shape_prior_weight=shape_prior_weight,
             texture_prior_weight=texture_prior_weight,
-            landmarks_prior_weight=landmarks_prior_weight,
-            landmarks=rescaled_initial_shape, return_costs=return_costs)
+            landmarks_prior_weight=landmarks_prior_weight, component_weights = component_weights,
+            confidence_mask = confidence_mask, landmarks=rescaled_initial_shape, return_costs=return_costs, verbose = verbose)
 
         # Return multi-scale fitting result
         return self._fitter_result(
@@ -288,7 +308,7 @@ class MMFitter(object):
 class LucasKanadeMMFitter(MMFitter):
     def __init__(self, mm, lk_algorithm_cls=SimultaneousForwardAdditive,
                  n_scales=1, n_shape=1.0, n_texture=1.0, n_samples=1000,
-                 camera_cls=PerspectiveCamera):
+                 camera_cls=PerspectiveCamera, confidence_mask = None):
         # Check parameters
         n_shape = checks.check_multi_scale_param(n_scales, (int,), 'n_shape',
                                                  n_shape)
@@ -308,7 +328,7 @@ class LucasKanadeMMFitter(MMFitter):
             mm_copy = mm.copy()
             set_model_components(mm_copy.shape_model, n_shape[i])
             set_model_components(mm_copy.texture_model, n_texture[i])
-            algorithms.append(lk_algorithm_cls(mm_copy, self.n_samples[i]))
+            algorithms.append(lk_algorithm_cls(mm_copy, self.n_samples[i], confidence_mask = confidence_mask))
 
         # Call superclass
         super(LucasKanadeMMFitter, self).__init__(mm=mm, algorithms=algorithms,

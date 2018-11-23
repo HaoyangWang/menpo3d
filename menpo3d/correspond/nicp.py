@@ -5,11 +5,15 @@ from menpo.transform import Translation, UniformScale, AlignmentSimilarity
 from menpo3d.vtkutils import trimesh_to_vtk, VTKClosestPointLocator
 from menpo3d.morphablemodel.shapemodel import ShapeModel
 
+import menpo3d.io as m3io
 
 import os
 import sys
 from contextlib import contextmanager
 import warnings
+
+import scipy
+
 
 @contextmanager
 def stdout_redirected(to=os.devnull):
@@ -44,10 +48,12 @@ try:
     
     try:
         # First try the newer scikit-sparse namespace
-        from sksparse.cholmod import cholesky_AAt
+        from sksparse.cholmod import cholesky_AAt, CholmodError
+        from scipy.sparse.linalg import spsolve as scipy_spsolve
     except ImportError:
         # Fall back to the older scikits.sparse namespace
-        from scikits.sparse.cholmod import cholesky_AAt
+        from scikits.sparse.cholmod import cholesky_AAt, CholmodError
+        from scipy.sparse.linalg import spsolve as scipy_spsolve
 
     # user has cholesky available - provide a fast solve
     def spsolve(sparse_X, dense_b):
@@ -55,8 +61,18 @@ try:
         # low-level std-out to stop it from swamping our stdout (these low-level
         # prints come from METIS, but the solution behaves as normal)
         with stdout_redirected():
-            factor = cholesky_AAt(sparse_X.T)
-        return factor(sparse_X.T.dot(dense_b)).toarray()
+            try:
+                factor = cholesky_AAt(sparse_X.T)
+                X = factor(sparse_X.T.dot(dense_b)).toarray()
+            except CholmodError:
+                warnings.warn("Matrix not positive definite."
+                             "cholesky decomposition not available, using "
+                             "scipy solver instead")
+                #scipy.io.savemat('/data/tmp16', {'A_s': sparse_X})
+                #exit(0)
+                X = scipy_spsolve(sparse_X.T.dot(sparse_X),
+                            sparse_X.T.dot(dense_b)).toarray()
+        return X
 
 except ImportError:
     # fallback to (much slower) scipy solve
@@ -196,7 +212,8 @@ def non_rigid_icp_generator_handler(generator, generate_instances):
                 instance = next(generator)
             except StopIteration:
                 return instance[0]
-
+            
+            
 
 def non_rigid_icp_generator(source, target, eps=1e-3,
                             stiffness_weights=None, data_weights=None,
@@ -207,6 +224,7 @@ def non_rigid_icp_generator(source, target, eps=1e-3,
     """
     # If landmarks are provided, we should always start with a simple
     # AlignmentSimilarity between the landmarks to initialize optimally.
+
     if landmark_group is not None:
         if verbose:
             print("'{}' landmarks will be used as "
@@ -220,15 +238,36 @@ def non_rigid_icp_generator(source, target, eps=1e-3,
     # rescale the source down to a sensible size (so it fits inside box of
     # diagonal 1) and is centred on the origin. We'll undo this after the fit
     # so the user can use whatever scale they prefer.
-    tr = Translation(-1 * source.centre())
-    sc = UniformScale(1.0 / np.sqrt(np.sum(source.range() ** 2)), 3)
-    prepare = tr.compose_before(sc)
+    
+    #tr = Translation(-1 * source.centre())
+    #sc = UniformScale(1.0 / np.sqrt(np.sum(source.range() ** 2)), 3)
+    
+    #tr_t = Translation(-1 * target.centre())
+    #sc_t = UniformScale(1.0 / np.sqrt(np.sum(target.range() ** 2)), 3) 
+    
+    #tr = Translation([0, 0, 0])
+    #sc = UniformScale(1.0, 3)
 
-    source = prepare.apply(source)
-    target = prepare.apply(target)
+    #prepare = tr.compose_before(sc)
+    #prepare_t = tr_t.compose_before(sc_t)
+
+    #source = prepare.apply(source)
+    #target = prepare_t.apply(target)
+    
+    #m3io.export_mesh(source, '/data/tmp/source.obj', overwrite = True)
+    #m3io.export_mesh(target, '/data/tmp/target.obj', overwrite = True)
+    
+    #t = AlignmentSimilarity(source.landmarks['LJSON'], target.landmarks['LJSON'])
+
+    #source = t.apply(source)
+    
 
     # store how to undo the similarity transform
-    restore = prepare.pseudoinverse()
+    # restore = prepare.pseudoinverse()
+    
+    # restore source to target scale
+    #restore = prepare_t.pseudoinverse()
+    restore = Translation([0, 0, 0])
 
     n_dims = source.n_dims
     # Homogeneous dimension (1 extra for translation effects)
@@ -236,14 +275,18 @@ def non_rigid_icp_generator(source, target, eps=1e-3,
     points, trilist = source.points, source.trilist
     n = points.shape[0]  # record number of points
 
-    edge_tris = source.boundary_tri_index()
+    # ========================================================================
+    edge_tris = target.boundary_tri_index() # SOURCE???
+    # ========================================================================
 
     M_s, unique_edge_pairs = node_arc_incidence_matrix(source)
+    #print('M_s {}'.format(M_s.shape))
 
     # weight matrix
     G = np.identity(n_dims + 1)
 
     M_kron_G_s = sp.kron(M_s, G)
+    #print('M_kron_G_s {}'.format(M_kron_G_s.shape))
 
     # build octree for finding closest points on target.
     target_vtk = trimesh_to_vtk(target)
@@ -355,9 +398,10 @@ def non_rigid_icp_generator(source, target, eps=1e-3,
             print(i_str)
 
         j = 0
+        
         while True:  # iterate until convergence
             j += 1  # track the iterations for this alpha/landmark weight
-
+            
             # find nearest neighbour and the normals
             U, tri_indices = closest_points_on_target(v_i)
 
@@ -395,15 +439,16 @@ def non_rigid_icp_generator(source, target, eps=1e-3,
 
             # Form the overall w_i from the normals, edge case
             # for now disable the edge constraint (it was noisy anyway)
-            w_i = w_i_n
+            #w_i = w_i_n
 
-            # w_i = np.logical_and(w_i_n, w_i_e).astype(np.float)
+            w_i = np.logical_and(w_i_n, w_i_e).astype(np.float)
 
             # we could add self intersection at a later date too...
             # w_i = np.logical_and(np.logical_and(w_i_n,
             #                                     w_i_e,
-            #                                     w_i_i).astype(np.float)
+            #                                     w_i_i).astype(np.float))
 
+            # ===========================
             prop_w_i = (n - w_i.sum() * 1.0) / n
             prop_w_i_n = (n - w_i_n.sum() * 1.0) / n
             prop_w_i_e = (n - w_i_e.sum() * 1.0) / n
@@ -413,6 +458,7 @@ def non_rigid_icp_generator(source, target, eps=1e-3,
 
             # Build the sparse diagonal weight matrix
             W_s = sp.diags(w_i.astype(np.float)[None, :], [0])
+            #print('W_s {}'.format(W_s.shape))
 
             data = np.hstack((v_i.ravel(), o))
             D_s = sp.coo_matrix((data, (row, col)))
@@ -427,9 +473,17 @@ def non_rigid_icp_generator(source, target, eps=1e-3,
                 to_stack_A.append(beta * D_L)
                 to_stack_B.append(beta * U_L)
 
+
             A_s = sp.vstack(to_stack_A).tocsr()
+            #print('A_s {}'.format(A_s.shape))
+
             B_s = sp.vstack(to_stack_B).tocsr()
+            
+            #try:
             X = spsolve(A_s, B_s)
+            #except CholmodError:
+            #    m3io.export_mesh(v_i_tm, 'problematic.obj', overwrite = True)
+            #    exit(0)
 
             # deform template
             v_i_prev = v_i

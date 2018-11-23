@@ -3,7 +3,8 @@ import numpy as np
 import warnings
 
 from menpo.base import Vectorizable, MenpoMissingDependencyError
-from menpo.transform import Transform, Translation, Rotation
+from menpo.transform import Transform, Translation, Rotation, AlignmentRotation, AlignmentTranslation
+from menpo.shape import PointCloud
 
 
 def align_2d_3d(points_3d, points_image, image_shape, focal_length=None,
@@ -29,9 +30,15 @@ def align_2d_3d(points_3d, points_image, image_shape, focal_length=None,
     # mesh, its 2D projection on the image, the camera matrix and the
     # distortion coefficients
     lm2d = points_image.points[:, ::-1].copy()
+    
+    # trying other flags
+    lm2d = np.ascontiguousarray(lm2d[:,:2]).reshape((lm2d.shape[0],1,2))
+    
+    #print(lm2d.shape)
+    #print(points_3d.points.shape)
     converged, r_vec, t_vec = cv2.solvePnP(points_3d.points,
                                            lm2d,
-                                           camera_matrix, distortion_coeffs)
+                                           camera_matrix, distortion_coeffs, flags=cv2.SOLVEPNP_EPNP)
 
     if not converged:
         warnings.warn('cv2.SolvePnP did not converge to a solution')
@@ -39,6 +46,8 @@ def align_2d_3d(points_3d, points_image, image_shape, focal_length=None,
     # Create rotation and translation transform objects from the vectors
     # acquired at the previous step
     rotation_matrix = cv2.Rodrigues(r_vec)[0]
+    #print(rotation_matrix)
+    #print(t_vec)
     r = Rotation(rotation_matrix)
     t = Translation(t_vec.ravel())
 
@@ -123,8 +132,37 @@ class OrthographicCamera(Vectorizable):
     def init_from_2d_projected_shape(cls, points_3d, points_image,
                                      image_shape, focal_length=None,
                                      distortion_coeffs=None):
-        raise NotImplementedError("Orthographic camera pose estimation not "
-                                  "implemented.")
+        #raise NotImplementedError("Orthographic camera pose estimation not "
+        #                          "implemented.")
+        
+        #rotation, translation, projection(focal_length, image_shape)
+        
+        # hmm not really?
+        
+        
+        #points_clipped = PointCloud(points_3d.points[:, :2])
+        
+        #min_b, max_b = points_clipped.bounds()
+        
+        #min_b1, max_b1 = points_image.bounds()
+        
+        #scale = (max_b1[1] - min_b1[1]) / (max_b[1] - min_b[1])
+        
+        height, width = image_shape
+        
+        focal_length = max(height, width)
+        
+        rotation = Rotation(np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]]))
+        
+        #points_rotated = rotation.apply(points_clipped)
+        #translation = AlignmentTranslation(points_rotated, points_image)
+        
+        translation = Translation(np.array([0, 0, focal_length]))
+        
+        return OrthographicCamera(rotation, translation, OrthographicProjection(focal_length, image_shape))
+        
+        #raise NotImplementedError("Not implemented")
+        
 
     def apply(self, instance, **kwargs):
         return self.camera_transform.apply(instance)

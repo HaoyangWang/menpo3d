@@ -10,14 +10,16 @@ from .derivatives import (d_camera_d_camera_parameters,
                           d_camera_d_shape_parameters)
 from ..result import MMAlgorithmResult
 
+import matplotlib.pyplot as plt
+
 
 class LucasKanade(object):
-    def __init__(self, model, n_samples, eps=1e-3):
+    def __init__(self, model, n_samples, eps=1e-3, confidence_mask = None):
         self.model = model
         self.eps = eps
         self.n_samples = n_samples
         # Call precompute
-        self._precompute()
+        self._precompute(confidence_mask)
 
     @property
     def n(self):
@@ -57,6 +59,7 @@ class LucasKanade(object):
 
     def visible_sample_points(self, instance_in_img, image_shape):
         # Inverse rendering
+
         yx, bcoords, tri_indices = rasterize_barycentric_coordinates(
             instance_in_img, image_shape)
 
@@ -125,7 +128,7 @@ class LucasKanade(object):
         J = np.transpose(J, (1, 0, 2)).reshape(n_params, -1)
         return J, n_camera_parameters
 
-    def _precompute(self):
+    def _precompute(self, confidence_mask = None):
         # Rescale shape and appearance components to have size:
         # n_vertices x (n_active_components * n_dims)
         shape_pc = self.model.shape_model.components.T
@@ -134,8 +137,19 @@ class LucasKanade(object):
         # Priors
         self.J_shape_prior = 1. / np.array(self.model.shape_model.eigenvalues)
         self.J_texture_prior = 1. / np.array(self.model.texture_model.eigenvalues)
-        self.shape_pc_lms = shape_pc.reshape([self.n_vertices, 3, -1])[
-            self.model.model_landmarks_index]
+        if confidence_mask is not None:
+            confidence_mask = np.array(confidence_mask)
+            if not len(confidence_mask) == len(self.model.model_landmarks_index):
+                print('confidence_mask must have same dimension as model landmarks index')
+            if not confidence_mask.dtype == bool:
+                print('converting confidence mask to boolean array')
+                confidence_mask = confidence_mask.astype(bool)
+                
+            self.shape_pc_lms = shape_pc.reshape([self.n_vertices, 3, -1])[
+                self.model.model_landmarks_index[confidence_mask]]
+        else:
+            self.shape_pc_lms = shape_pc.reshape([self.n_vertices, 3, -1])[
+                self.model.model_landmarks_index]
 
 
 class SimultaneousForwardAdditive(LucasKanade):
@@ -146,8 +160,8 @@ class SimultaneousForwardAdditive(LucasKanade):
     def run(self, image, initial_mesh, camera, gt_mesh=None, max_iters=20,
             camera_update=False, focal_length_update=False,
             reconstruction_weight=1., shape_prior_weight=1.,
-            texture_prior_weight=1., landmarks=None, landmarks_prior_weight=1.,
-            return_costs=False, verbose=True):
+            texture_prior_weight=1., landmarks=None, landmarks_prior_weight=1., component_weights = None, 
+            confidence_mask = None, return_costs=False, verbose=True):
         # Parse landmarks prior options
         if landmarks is None or landmarks_prior_weight is None:
             landmarks_prior_weight = None
@@ -160,6 +174,28 @@ class SimultaneousForwardAdditive(LucasKanade):
         # Project provided instance to retrieve shape and texture parameters.
         camera_parameters = camera.as_vector()
         shape_parameters = self.model.shape_model.project(initial_mesh)
+        # ==============================================================
+        # ==============================================================
+        if component_weights is not None:
+            if not len(component_weights) == self.model.shape_model.n_active_components:
+                print('component_weights and shape does not match!!')
+                print(self._model.shape_model.n_active_components)
+        else:
+            component_weights = np.ones((self.model.shape_model.n_active_components, ))
+            #print('initialising')
+        
+        if confidence_mask is not None:
+            confidence_mask = np.array(confidence_mask)
+            if not len(confidence_mask) == len(self.model.model_landmarks_index):
+                print('confidence_mask must have same dimension as model landmarks index')
+            if not confidence_mask.dtype == bool:
+                print('converting confidence mask to boolean array')
+                confidence_mask = confidence_mask.astype(bool)
+                
+        else:
+            confidence_mask = np.ones((self.model.model_landmarks_index.shape[0], )).astype(bool)
+        # ==============================================================
+        # ==============================================================
         texture_parameters = self.model.project_instance_on_texture_model(
             initial_mesh)
 
@@ -208,6 +244,8 @@ class SimultaneousForwardAdditive(LucasKanade):
             shape_pc_uv = shape_pc_uv.reshape([self.n_samples, 3, -1])
 
             # Sample all the terms from the image part at the sample locations
+            
+            #print(yx)
             img_uv = image.sample(yx)
             grad_x_uv = grad_x.sample(yx)
             grad_y_uv = grad_y.sample(yx)
@@ -223,6 +261,7 @@ class SimultaneousForwardAdditive(LucasKanade):
                     reconstruction_weight)
                 hessian = sd.dot(sd.T)
                 sd_error = sd.dot(img_error_uv)
+                #print(sd_error.shape)
             else:
                 n_camera_parameters = 0
                 if camera_update:
@@ -237,6 +276,8 @@ class SimultaneousForwardAdditive(LucasKanade):
             # Compute Jacobian, update SD and Hessian wrt shape prior
             if shape_prior_weight is not None:
                 sd_shape = shape_prior_weight * self.J_shape_prior
+                #print(sd_shape.shape) #(n_shape, )
+                #print(self.J_shape_prior.shape) #(n_shape, )
                 hessian[:self.n, :self.n] += np.diag(sd_shape)
                 sd_error[:self.n] += sd_shape * shape_parameters
 
@@ -251,19 +292,26 @@ class SimultaneousForwardAdditive(LucasKanade):
             lms_error = None
             if landmarks_prior_weight is not None:
                 # Get projected instance on landmarks and error term
-                warped_lms = instance_in_image.points[
-                    self.model.model_landmarks_index]
-                lms_error = (warped_lms[:, [1, 0]] - lms_points).T.ravel()
-                warped_view_lms = instance_w[self.model.model_landmarks_index]
+                # =========================================================================
+                # warped_lms = instance_in_image.points[
+                #     self.model.model_landmarks_index]
+                
+                if np.any(confidence_mask):
+                    warped_lms = instance_in_image.points[self.model.model_landmarks_index[confidence_mask]]
+                    
+                    lms_error = (warped_lms[:, [1, 0]] - lms_points[confidence_mask]).T.ravel()
+                    
+                    warped_view_lms = instance_w[self.model.model_landmarks_index[confidence_mask]]
+                    # =========================================================================
 
-                # Jacobian and Hessian wrt shape parameters
-                sd_lms, n_camera_parameters = self.J_lms(
-                    camera, warped_view_lms, self.shape_pc_lms, camera_update,
-                    focal_length_update)
-                idx = self.n + n_camera_parameters
-                hessian[:idx, :idx] += (landmarks_prior_weight *
-                                        sd_lms.dot(sd_lms.T))
-                sd_error[:idx] = landmarks_prior_weight * sd_lms.dot(lms_error)
+                    # Jacobian and Hessian wrt shape parameters
+                    sd_lms, n_camera_parameters = self.J_lms(
+                        camera, warped_view_lms, self.shape_pc_lms, camera_update,
+                        focal_length_update)
+                    idx = self.n + n_camera_parameters
+                    hessian[:idx, :idx] += (landmarks_prior_weight *
+                                            sd_lms.dot(sd_lms.T))
+                    sd_error[:idx] = landmarks_prior_weight * sd_lms.dot(lms_error)
 
             if return_costs:
                 costs.append(self.compute_cost(
@@ -277,7 +325,15 @@ class SimultaneousForwardAdditive(LucasKanade):
                 focal_length_update, camera)
 
             # Update parameters
-            shape_parameters += d_shape
+            #print(d_shape)
+            #print(component_weights)
+            #print(component_weights * d_shape)
+            #print(shape_parameters)
+            #print(component_weights * d_shape)
+            shape_parameters += component_weights * d_shape
+            
+            #shape_parameters += d_shape
+            #print(shape_parameters)
             if camera_update:
                 camera_parameters = camera_parameters_update(
                     camera_parameters, d_camera)
@@ -289,7 +345,7 @@ class SimultaneousForwardAdditive(LucasKanade):
                                            texture_weights=texture_parameters)
 
             # Update lists
-            shape_parameters_per_iter.append(shape_parameters)
+            shape_parameters_per_iter.append(shape_parameters) # !!! appending the reference instead of true value
             texture_parameters_per_iter.append(texture_parameters)
             camera_per_iter.append(camera)
             instance_per_iter.append(instance.rescale_texture(0., 1.))

@@ -1,0 +1,23 @@
+%symmlq_matlab.README
+
+The software for SYMMLQ (MATLAB version) is provided by SOL, Stanford University
+under the terms of the OSI Common Public License (CPL):
+http://www.opensource.org/licenses/cpl1.0.php
+
+
+04 Feb 2000: First set of files available for download from SOL.
+
+Please send comments to Michael Saunders, SOL, Stanford University
+                        saunders@stanford.edu  650-723-1875
+-----------------------------------------------------------------------------
+
+The MATLAB version of SYMMLQ involves the following files:
+
+   symaprod.m   y = A*x product routine for SYMMLQ test example
+   symdoc.m     Documentation for symmlq.m
+   symmlq.m     CG-type solver for symmetric Ax = b
+   symmsolv.m   M*y = x solve routine for test example (M = preconditioner)
+   symtest.m    Driver that calls symmlq.m
+   symtestp.m   Driver that calls symtest.m several times
+
+
